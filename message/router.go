@@ -575,6 +575,18 @@ func (r *Router) Close() error {
 	r.logger.Debug("Running Close()", nil)
 	r.closed = true
 
+	// Handlers that were added but never started have no goroutine that will
+	// call handlersWg.Done(), so release their counter here. Otherwise Close
+	// waits out the whole CloseTimeout for handlers that never ran.
+	for name, h := range r.handlers {
+		if h.started {
+			continue
+		}
+		r.logger.Debug("Handler was not started, not waiting for it", watermill.LogFields{"handler_name": name})
+		r.handlersWg.Done()
+		delete(r.handlers, name)
+	}
+
 	r.logger.Info("Closing router", nil)
 	defer r.logger.Info("Router closed", nil)
 
