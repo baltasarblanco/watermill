@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1543,6 +1544,49 @@ func TestRouter_close_when_handlers_were_not_started(t *testing.T) {
 	}
 }
 
+func TestRouter_close_closes_pubsub_of_handlers_that_were_not_started(t *testing.T) {
+	t.Parallel()
+
+	r, err := message.NewRouter(
+		message.RouterConfig{
+			CloseTimeout: time.Second * 10,
+		},
+		watermill.NewStdLogger(true, true),
+	)
+	require.NoError(t, err)
+
+	sub := &closeRecordingSubscriber{}
+	pub := &closeRecordingPublisher{}
+
+	// The router is never run, so nothing else will close the handler's
+	// subscriber and publisher.
+	r.AddHandler(
+		"handler",
+		"subscribe_topic",
+		sub,
+		"publish_topic",
+		pub,
+		func(msg *message.Message) ([]*message.Message, error) {
+			return nil, nil
+		},
+	)
+
+	closed := make(chan error)
+	go func() {
+		closed <- r.Close()
+	}()
+
+	select {
+	case err := <-closed:
+		assert.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Close() didn't return for a handler that was never started")
+	}
+
+	assert.True(t, sub.closed.Load(), "subscriber of a handler that was never started was not closed")
+	assert.True(t, pub.closed.Load(), "publisher of a handler that was never started was not closed")
+}
+
 func TestRouter_close_when_running_handlers_failed(t *testing.T) {
 	t.Parallel()
 
@@ -1639,5 +1683,31 @@ func (s *failingSubscriberMock) Subscribe(ctx context.Context, topic string) (<-
 }
 
 func (s *failingSubscriberMock) Close() error {
+	return nil
+}
+
+type closeRecordingSubscriber struct {
+	closed atomic.Bool
+}
+
+func (s *closeRecordingSubscriber) Subscribe(ctx context.Context, topic string) (<-chan *message.Message, error) {
+	return make(chan *message.Message), nil
+}
+
+func (s *closeRecordingSubscriber) Close() error {
+	s.closed.Store(true)
+	return nil
+}
+
+type closeRecordingPublisher struct {
+	closed atomic.Bool
+}
+
+func (p *closeRecordingPublisher) Publish(topic string, messages ...*message.Message) error {
+	return nil
+}
+
+func (p *closeRecordingPublisher) Close() error {
+	p.closed.Store(true)
 	return nil
 }
